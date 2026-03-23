@@ -215,7 +215,7 @@ def send_telegram_message(message: str) -> None:
         if part.strip():
             payload = {
                 "chat_id": TELEGRAM_CHANNEL_ID,
-                "text": f"{part.strip()}\n\Part {i} of {len(parts)}",
+                "text": f"{part.strip()}\nPart {i} of {len(parts)}",
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             }
