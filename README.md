@@ -1,6 +1,6 @@
 # SitePulse
 
-Lightweight website monitoring tool. Fetches all URLs in your `sitemap.xml`, checks each URL using desktop and mobile User-Agent headers, monitors domain expiration and nameserver settings, and sends alerts via Telegram.
+Lightweight website monitoring tool. Fetches all URLs in your `sitemap.xml`, checks each URL using desktop and mobile User-Agent headers, monitors domain registration and SSL certificate expiry, and sends alerts via Telegram. Supports multiple projects, each with any number of domains.
 
 ## Quick Start
 
@@ -8,8 +8,8 @@ Lightweight website monitoring tool. Fetches all URLs in your `sitemap.xml`, che
 git clone https://github.com/rogulia/sitepulse.git
 cd sitepulse
 pip install -r requirements.txt
-cp .env.example .env
-# edit .env with your Telegram token and channel ID
+cp .env.example .env            # Telegram token and channel ID
+cp config.example.toml config.toml   # your projects and domains
 python monitor.py
 ```
 
@@ -19,8 +19,10 @@ python monitor.py
 - **Parallel checks** — checks multiple pages concurrently using a thread pool
 - **Automatic retries** — retries failed requests once after a 5-second delay
 - **Response validation** — checks HTTP status codes, response sizes, and load times
-- **Domain monitoring** — monitors domain expiration dates and checks nameserver settings
-- **Telegram alerts** — sends notifications configurable via environment variables (`NOTIFY_ERROR`, `NOTIFY_WARNING`, `NOTIFY_SUCCESS`)
+- **Multiple projects** — one config describes any number of projects, each with its own sitemap and domains
+- **Domain monitoring** — registration expiry via RDAP with WHOIS fallback, and optional nameserver check
+- **SSL monitoring** — certificate expiry and validity (chain, hostname) for every configured host
+- **Telegram alerts** — sends notifications configurable in `config.toml` (`notify_error`, `notify_warning`, `notify_success`)
 - **Daily summaries** — generates a 24-hour report and sends it to Telegram
 - **Log management** — automatic log rotation with configurable retention period
 - **Performance analysis** — built-in tool to analyze logs and identify slowest, largest, and most unstable pages
@@ -30,7 +32,13 @@ python monitor.py
 ```
 sitepulse/
 ├── monitor.py           — main script (page checks, daily summary, domain checks)
-├── config.py            — loads configuration from .env
+├── config.py            — loads config.toml and secrets from the environment
+├── checks/
+│   ├── domain.py        — registration expiry lookup (RDAP, WHOIS)
+│   ├── ssl_cert.py      — SSL certificate check
+│   └── expiry.py        — runs expiry checks and builds the report
+├── tests/
+├── config.example.toml  — configuration template
 ├── utils/
 │   ├── analyzer.py      — log analysis and performance reports
 │   └── clean_logs.py    — log rotation utility
@@ -42,65 +50,55 @@ sitepulse/
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - A Telegram bot token (create one via [@BotFather](https://t.me/BotFather))
 - A Telegram channel or group where the bot is an admin
 
 ## Configuration
 
-All settings are stored in the `.env` file. The application will not start without the required variables.
+Secrets live in the environment (or `.env`); everything else lives in `config.toml`. The path can be overridden with `SITEPULSE_CONFIG`. The application exits with an error if the config is invalid.
 
-### Required
+### Environment
 
 | Variable | Description |
 |---|---|
 | `TELEGRAM_TOKEN` | Telegram bot API token from [@BotFather](https://t.me/BotFather) |
-| `TELEGRAM_CHANNEL_ID` | Telegram channel or group ID where alerts are sent. Use [@userinfobot](https://t.me/userinfobot) or similar to find it. Channel IDs typically start with `-100` |
+| `TELEGRAM_CHANNEL_ID` | Telegram channel or group ID where alerts are sent. Channel IDs typically start with `-100` |
+| `SITEPULSE_CONFIG` | Optional path to the config file (default: `config.toml` next to `monitor.py`) |
 
-### Monitoring Target
+### `config.toml`
 
-| Variable | Default | Description |
+See [config.example.toml](config.example.toml) for a complete template.
+
+`[settings]` (all optional):
+
+| Key | Default | Description |
 |---|---|---|
-| `BASE_URL` | `https://example.com` | The base URL of the website to monitor |
-| `SITEMAP_PATH` | `/sitemap.xml` | Path to the sitemap file, appended to `BASE_URL` |
+| `min_response_size` | `1000` | Minimum response size in bytes; smaller pages are errors |
+| `connect_timeout` / `read_timeout` | `20` / `60` | Timeouts in seconds |
+| `slow_response_threshold` | `10` | Responses slower than this (seconds) are warnings |
+| `max_workers` | `10` | Parallel threads |
+| `notify_success` / `notify_warning` / `notify_error` | `false` / `false` / `true` | Which page check results are sent to Telegram |
+| `domain_warn_days` / `domain_critical_days` | `60` / `14` | Registration expiry thresholds |
+| `ssl_warn_days` / `ssl_critical_days` | `21` / `7` | Certificate expiry thresholds |
+| `log_retention_days` | `10` | Days of log entries kept |
 
-### Thresholds
+`[[project]]`:
 
-| Variable | Default | Description |
-|---|---|---|
-| `MIN_RESPONSE_SIZE` | `1000` | Minimum response size in bytes. Pages smaller than this trigger an error |
-| `CONNECT_TIMEOUT` | `20` | Connection timeout in seconds |
-| `READ_TIMEOUT` | `60` | Read timeout in seconds |
-| `SLOW_RESPONSE_THRESHOLD` | `10` | Responses slower than this (in seconds) trigger a warning |
-| `MAX_WORKERS` | `10` | Number of parallel threads for page checks |
+| Key | Description |
+|---|---|
+| `name` | Unique project name, shown in alerts |
+| `url` | Base URL of the site |
+| `sitemap` | Optional; default `<url>/sitemap.xml` |
 
-### Notifications
+`[[project.domain]]` (repeat for each domain of the project):
 
-| Variable | Default | Description |
-|---|---|---|
-| `NOTIFY_SUCCESS` | `false` | Send a Telegram message for each successful check |
-| `NOTIFY_WARNING` | `false` | Send a Telegram message for warnings (slow responses) |
-| `NOTIFY_ERROR` | `true` | Send a Telegram message for errors (timeouts, bad status codes, small responses) |
-
-### Domain Monitoring
-
-| Variable | Default | Description |
-|---|---|---|
-| `DOMAINS_TO_CHECK` | *(empty)* | Comma-separated list of domains. Optionally specify a known expiry date with `:expiry=YYYY-MM-DD` suffix (used as a fallback if WHOIS lookup fails) |
-| `OUR_NAMESERVERS` | *(empty)* | Comma-separated list of expected nameservers. Alerts if a domain uses different ones |
-| `EXPIRY_WARNING_DAYS` | `90` | Warn this many days before a domain expires |
-
-**`DOMAINS_TO_CHECK` format example:**
-
-```
-DOMAINS_TO_CHECK=example.com,example.net:expiry=2025-06-15,example.org
-```
-
-### Log Settings
-
-| Variable | Default | Description |
-|---|---|---|
-| `LOG_RETENTION_DAYS` | `10` | Number of days to keep log entries. Older entries are removed during daily summary |
+| Key | Description |
+|---|---|
+| `name` | Domain name whose registration is checked |
+| `hosts` | Hosts whose SSL certificate is checked; default is the domain itself |
+| `nameservers` | Optional; alerts if the registry reports none of them |
+| `expiry_fallback` | Optional `YYYY-MM-DD`; used only when RDAP and WHOIS both fail. Needed for TLDs that do not publish expiry dates (for example `.de`) |
 
 ## Usage
 
@@ -120,12 +118,12 @@ Cleans old log entries, then analyzes the last 24 hours and sends a summary to T
 python monitor.py --daily-summary
 ```
 
-### Domain check
+### Expiry check
 
-Checks domain expiration dates and nameserver settings. Only sends alerts when issues are found.
+Checks domain registration expiry and SSL certificates for every project. Sends one Telegram message per run, only when something needs attention: expiring soon, already expired, invalid certificate, or a lookup that failed. While a problem persists, it is reported on every run.
 
 ```bash
-python monitor.py --check-domains
+python monitor.py --check-expiry
 ```
 
 ### Log analysis
@@ -161,15 +159,15 @@ Example schedule:
 # Daily summary at 9:00 AM
 0 9 * * * cd /path/to/sitepulse && python monitor.py --daily-summary
 
-# Domain check once a week on Monday at 10:00 AM
-0 10 * * 1 cd /path/to/sitepulse && python monitor.py --check-domains
+# Expiry check once a day at 8:00 AM
+0 8 * * * cd /path/to/sitepulse && python monitor.py --check-expiry
 ```
 
 Replace `/path/to/sitepulse` with the actual path to the project directory.
 
 ## Telegram Alert Examples
 
-**Successful check** (when `NOTIFY_SUCCESS=true`):
+**Successful check** (when `notify_success = true`):
 
 ```
 ✅ URL: https://example.com/about
@@ -191,6 +189,16 @@ Error: Response code: 500
 Error: Response code: 500
 ```
 
+**Expiry alert:**
+
+```
+📅 Expiry check 02.11.2026 08:00 UTC
+
+🚨 example
+- example.com: registration expires in 9 days (11.11.2026)
+- www.example.com: SSL certificate expires in 5 days (07.11.2026)
+```
+
 **Daily summary (no errors):**
 
 ```
@@ -198,6 +206,13 @@ Error: Response code: 500
 
 ✅ All pages worked correctly during the last 24 hours.
 📝 Total checks: 384
+```
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
 
 ## License

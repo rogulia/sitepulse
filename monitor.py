@@ -1,38 +1,35 @@
-import requests
-import logging
-from typing import List
-from datetime import datetime
-from pytz import timezone
+import argparse
 import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor
-import time
-import whois
+import html
+import logging
+import os
 import sys
+import time
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone as dt_timezone
+from typing import List
 
+import requests
+from pytz import timezone
+
+from checks.expiry import format_report, run_expiry_checks
 from config import (
-    TELEGRAM_TOKEN,
-    TELEGRAM_CHANNEL_ID,
-    BASE_URL,
-    SITEMAP_URL,
-    MIN_RESPONSE_SIZE,
-    CONNECT_TIMEOUT,
-    READ_TIMEOUT,
-    SLOW_RESPONSE_THRESHOLD,
-    MAX_WORKERS,
-    NOTIFY_SUCCESS,
-    NOTIFY_WARNING,
-    NOTIFY_ERROR,
-    EXPIRY_WARNING_DAYS,
+    LOG_DIR,
     LOG_FILE,
-    DOMAINS_TO_CHECK,
-    OUR_NAMESERVERS,
+    Config,
+    ConfigError,
+    Settings,
+    load_config,
+    telegram_credentials,
 )
 
+logger = logging.getLogger("sitepulse")
 
-# Logging setup
-def setup_logging():
+
+def setup_logging() -> None:
     """Set up logging to file and console."""
+    os.makedirs(LOG_DIR, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
     file_handler = logging.FileHandler(LOG_FILE)
@@ -46,13 +43,6 @@ def setup_logging():
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
 
-    logger = logging.getLogger(__name__)
-    logger.debug("Logging configured")
-    return logger
-
-
-logger = setup_logging()
-logger.debug("Script started")
 
 # HTTP headers
 DESKTOP_HEADERS = {
@@ -77,16 +67,17 @@ MOBILE_HEADERS = {
     "Sec-Fetch-Dest": "empty",
 }
 
-logger.debug("HTTP headers configured")
-logger.debug(f"Using sitemap: {SITEMAP_URL}")
 
-
-def get_urls_from_sitemap(sitemap_url: str) -> List[str]:
+def get_urls_from_sitemap(
+    sitemap_url: str, fallback_url: str, settings: Settings
+) -> List[str]:
     """Fetch and parse URLs from a sitemap.xml, auto-detecting XML namespace."""
     logger.debug(f"Fetching URLs from sitemap: {sitemap_url}")
     try:
         logger.debug(f"Sending request to {sitemap_url}")
-        response = requests.get(sitemap_url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+        response = requests.get(
+            sitemap_url, timeout=(settings.connect_timeout, settings.read_timeout)
+        )
         response.raise_for_status()
         logger.debug(
             f"Response received: status {response.status_code}, size {len(response.content)} bytes"
@@ -151,25 +142,20 @@ def get_urls_from_sitemap(sitemap_url: str) -> List[str]:
 
     except Exception as e:
         logger.error(f"Error fetching sitemap: {e}", exc_info=True)
-        logger.warning(f"Falling back to base URL: {BASE_URL}")
-        return [BASE_URL]
-
-
-# Fetch URLs from sitemap
-logger.debug("Starting URL fetch from sitemap")
-URLS_TO_CHECK = get_urls_from_sitemap(SITEMAP_URL)
-logger.debug(f"Fetched {len(URLS_TO_CHECK)} URLs to check")
+        logger.warning(f"Falling back to base URL: {fallback_url}")
+        return [fallback_url]
 
 
 def send_telegram_message(message: str) -> None:
     """Send a message to the Telegram channel, splitting if too long."""
     max_length = 4000  # Safety margin from the 4096 limit
-    telegram_api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    token, chat_id = telegram_credentials()
+    telegram_api_url = f"https://api.telegram.org/bot{token}/sendMessage"
 
     # If message fits in one chunk, send as-is
     if len(message) <= max_length:
         payload = {
-            "chat_id": TELEGRAM_CHANNEL_ID,
+            "chat_id": chat_id,
             "text": message,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
@@ -214,7 +200,7 @@ def send_telegram_message(message: str) -> None:
     for i, part in enumerate(parts, 1):
         if part.strip():
             payload = {
-                "chat_id": TELEGRAM_CHANNEL_ID,
+                "chat_id": chat_id,
                 "text": f"{part.strip()}\nPart {i} of {len(parts)}",
                 "parse_mode": "HTML",
                 "disable_web_page_preview": True,
@@ -228,7 +214,7 @@ def send_telegram_message(message: str) -> None:
 
 
 def check_single_page(
-    url: str, session: requests.Session
+    url: str, session: requests.Session, settings: Settings
 ) -> tuple[str, bool, bool, bool]:
     """Check a single page in both desktop and mobile modes."""
 
@@ -236,19 +222,21 @@ def check_single_page(
         start_time = time.time()
 
         response = session.get(
-            url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT), headers=headers
+            url,
+            timeout=(settings.connect_timeout, settings.read_timeout),
+            headers=headers,
         )
         content_length = len(response.content)
         elapsed_time = time.time() - start_time
 
-        if response.status_code == 200 and content_length >= MIN_RESPONSE_SIZE:
+        if response.status_code == 200 and content_length >= settings.min_response_size:
             return response, content_length, elapsed_time, None
         else:
             error_msg = None
             if response.status_code != 200:
                 error_msg = f"Response code: {response.status_code}"
             else:
-                error_msg = f"Response size too small: {content_length} bytes (min. {MIN_RESPONSE_SIZE})"
+                error_msg = f"Response size too small: {content_length} bytes (min. {settings.min_response_size})"
             raise Exception(error_msg)
 
     messages = []
@@ -273,11 +261,9 @@ def check_single_page(
         )
 
         time_info = f"Response time: {elapsed_time:.2f} sec"
-        is_slow = elapsed_time > SLOW_RESPONSE_THRESHOLD
+        is_slow = elapsed_time > settings.slow_response_threshold
         if is_slow:
-            time_info = (
-                f"⚠️ {time_info} (threshold {SLOW_RESPONSE_THRESHOLD} sec exceeded)"
-            )
+            time_info = f"⚠️ {time_info} (threshold {settings.slow_response_threshold} sec exceeded)"
             has_warning = True
 
         messages.append(
@@ -306,11 +292,9 @@ def check_single_page(
         )
 
         time_info = f"Response time: {elapsed_time:.2f} sec"
-        is_slow = elapsed_time > SLOW_RESPONSE_THRESHOLD
+        is_slow = elapsed_time > settings.slow_response_threshold
         if is_slow:
-            time_info = (
-                f"⚠️ {time_info} (threshold {SLOW_RESPONSE_THRESHOLD} sec exceeded)"
-            )
+            time_info = f"⚠️ {time_info} (threshold {settings.slow_response_threshold} sec exceeded)"
             has_warning = True
 
         messages.append(
@@ -328,31 +312,37 @@ def check_single_page(
     return message, has_success and not has_warning, has_warning, has_error
 
 
-def check_pages() -> None:
-    """Check all pages from the sitemap."""
+def check_pages(config: Config) -> None:
+    """Check all pages from every project's sitemap."""
+    settings = config.settings
     timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
     messages_to_send = []
 
     with requests.Session() as session:
 
         def check_with_session(url):
-            return check_single_page(url, session)
+            return check_single_page(url, session, settings)
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_url = {
-                executor.submit(check_with_session, url): url for url in URLS_TO_CHECK
-            }
+        with ThreadPoolExecutor(max_workers=settings.max_workers) as executor:
+            future_to_project = {}
+            for project in config.projects:
+                urls = get_urls_from_sitemap(project.sitemap, project.url, settings)
+                for url in urls:
+                    future_to_project[executor.submit(check_with_session, url)] = (
+                        project
+                    )
 
-            for future in concurrent.futures.as_completed(future_to_url):
+            for future in concurrent.futures.as_completed(future_to_project):
+                project = future_to_project[future]
                 message, is_success, is_warning, is_error = future.result()
 
                 # Add message according to notification settings
                 if (
-                    (is_success and NOTIFY_SUCCESS)
-                    or (is_warning and NOTIFY_WARNING)
-                    or (is_error and NOTIFY_ERROR)
+                    (is_success and settings.notify_success)
+                    or (is_warning and settings.notify_warning)
+                    or (is_error and settings.notify_error)
                 ):
-                    messages_to_send.append(message)
+                    messages_to_send.append(f"[{html.escape(project.name)}] {message}")
 
     # Send if there are messages to deliver
     if messages_to_send:
@@ -360,11 +350,11 @@ def check_pages() -> None:
         send_telegram_message(message)
 
 
-def send_daily_summary() -> None:
+def send_daily_summary(config: Config) -> None:
     """Send a daily summary report via Telegram."""
     from utils.clean_logs import clean_old_logs
 
-    clean_old_logs(LOG_FILE)
+    clean_old_logs(LOG_FILE, config.settings.log_retention_days)
 
     try:
         logger.info("Starting daily summary generation...")
@@ -436,90 +426,42 @@ def send_daily_summary() -> None:
         logger.error(f"Error creating daily summary: {e}", exc_info=True)
 
 
-def check_domain(domain: str) -> tuple[str, bool]:
-    """Check domain registration expiry and nameservers."""
-    try:
-        w = whois.whois(domain)
-
-        # Check expiration date
-        if isinstance(w.expiration_date, list):
-            expiry_date = min(w.expiration_date)  # use the earliest date if multiple
-        else:
-            expiry_date = w.expiration_date
-
-        if expiry_date is None:
-            message = (
-                f"⚠️ Domain: {domain}\nCould not get expiration date, check manually"
-            )
-            return message, True
-
-        days_until_expiry = (expiry_date - datetime.now()).days
-
-        # Check nameservers
-        domain_ns = [ns.lower() for ns in w.name_servers]
-        our_ns = [ns.lower() for ns in OUR_NAMESERVERS]
-        using_our_ns = any(ns in domain_ns for ns in our_ns)
-
-        messages = []
-        has_warning = False
-
-        if days_until_expiry <= EXPIRY_WARNING_DAYS:
-            messages.append(
-                f"⚠️ Domain will expire in {days_until_expiry} days ({expiry_date.strftime('%Y-%m-%d')})"
-            )
-            has_warning = True
-
-        if not using_our_ns:
-            messages.append(
-                "⚠️ Domain is using external nameservers:\n"
-                + "\n".join(f"- {ns}" for ns in domain_ns)
-            )
-            has_warning = True
-
-        if not has_warning:
-            message = (
-                f"✅ Domain: {domain}\n"
-                f"Expiry: {expiry_date.strftime('%Y-%m-%d')} ({days_until_expiry} days)\n"
-                f"Nameservers OK"
-            )
-            return message, False
-        else:
-            message = f"🚨 Domain: {domain}\n" + "\n".join(messages)
-            return message, True
-
-    except Exception as e:
-        message = f"🚨 Error checking domain {domain}: {str(e)}"
-        return message, True
-
-
-def check_domains() -> None:
-    """Check all configured domains for expiry and nameserver issues."""
-    timestamp = datetime.now(timezone("Europe/Helsinki")).strftime("%d.%m.%Y %H:%M:%S")
-    warning_messages = []  # Only collect messages with warnings
-
-    for domain in DOMAINS_TO_CHECK:
-        message, has_warning = check_domain(domain)
-        if has_warning:  # Only include domains with issues
-            warning_messages.append(message)
-
-    if warning_messages:  # Only send report if there are issues
-        full_message = f"📅 Domain Check {timestamp}\n\n" + "\n\n".join(
-            warning_messages
-        )
-        send_telegram_message(full_message)
+def check_expiry(config: Config) -> None:
+    """Check domain registration and SSL certificate expiry for all projects."""
+    now = datetime.now(dt_timezone.utc)
+    report = format_report(run_expiry_checks(config), now)
+    if report:
+        send_telegram_message(report)
     else:
-        logger.info("Domain check completed - all OK")
+        logger.info("Expiry check completed - all OK")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="SitePulse website monitor")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--daily-summary", action="store_true", help="send the 24h summary"
+    )
+    mode.add_argument(
+        "--check-expiry",
+        action="store_true",
+        help="check domain registration and SSL certificate expiry",
+    )
+    args = parser.parse_args()
+
+    setup_logging()
+    try:
+        config = load_config()
+    except ConfigError as e:
+        parser.exit(2, f"Configuration error: {e}\n")
+
+    if args.daily_summary:
+        send_daily_summary(config)
+    elif args.check_expiry:
+        check_expiry(config)
+    else:
+        check_pages(config)
 
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "--daily-summary":
-            send_daily_summary()
-        elif sys.argv[1] == "--check-domains":
-            check_domains()
-        else:
-            check_pages()
-    else:
-        check_pages()
+    main()

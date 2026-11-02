@@ -1,61 +1,146 @@
 import os
+import tomllib
+from dataclasses import dataclass, field, fields
+from datetime import date
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
-
-# Telegram
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-TELEGRAM_CHANNEL_ID = os.environ["TELEGRAM_CHANNEL_ID"]
-
-# Monitoring target
-BASE_URL = os.getenv("BASE_URL", "https://example.com")
-SITEMAP_URL = f"{BASE_URL}{os.getenv('SITEMAP_PATH', '/sitemap.xml')}"
-
-# Monitoring thresholds
-MIN_RESPONSE_SIZE = int(os.getenv("MIN_RESPONSE_SIZE", "1000"))
-CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "20"))
-READ_TIMEOUT = int(os.getenv("READ_TIMEOUT", "60"))
-SLOW_RESPONSE_THRESHOLD = int(os.getenv("SLOW_RESPONSE_THRESHOLD", "10"))
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "10"))
-
-# Notification flags
-NOTIFY_SUCCESS = os.getenv("NOTIFY_SUCCESS", "false").lower() == "true"
-NOTIFY_WARNING = os.getenv("NOTIFY_WARNING", "false").lower() == "true"
-NOTIFY_ERROR = os.getenv("NOTIFY_ERROR", "true").lower() == "true"
-
-# Domain expiry warning
-EXPIRY_WARNING_DAYS = int(os.getenv("EXPIRY_WARNING_DAYS", "90"))
-
-# Log retention
-LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "10"))
-
-# Log file path
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_FILE = os.path.join(LOG_DIR, "website_monitor.log")
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_CONFIG_PATH = BASE_DIR / "config.toml"
+LOG_DIR = BASE_DIR / "logs"
+LOG_FILE = str(LOG_DIR / "website_monitor.log")
 
 
-def parse_domains(raw: str) -> dict:
-    """Parse DOMAINS_TO_CHECK env var.
-
-    Format: domain1,domain2:expiry=2025-02-11,domain3
-    """
-    domains = {}
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        if ":expiry=" in entry:
-            domain, expiry = entry.split(":expiry=", 1)
-            domains[domain.strip()] = {"expiry": expiry.strip()}
-        else:
-            domains[entry] = {}
-    return domains
+class ConfigError(Exception):
+    pass
 
 
-def parse_nameservers(raw: str) -> list:
-    return [ns.strip() for ns in raw.split(",") if ns.strip()]
+@dataclass(frozen=True)
+class Settings:
+    min_response_size: int = 1000
+    connect_timeout: int = 20
+    read_timeout: int = 60
+    slow_response_threshold: int = 10
+    max_workers: int = 10
+    notify_success: bool = False
+    notify_warning: bool = False
+    notify_error: bool = True
+    domain_warn_days: int = 60
+    domain_critical_days: int = 14
+    ssl_warn_days: int = 21
+    ssl_critical_days: int = 7
+    log_retention_days: int = 10
 
 
-DOMAINS_TO_CHECK = parse_domains(os.getenv("DOMAINS_TO_CHECK", ""))
-OUR_NAMESERVERS = parse_nameservers(os.getenv("OUR_NAMESERVERS", ""))
+@dataclass(frozen=True)
+class Domain:
+    name: str
+    hosts: tuple[str, ...]
+    nameservers: tuple[str, ...] = ()
+    expiry_fallback: str | None = None
+
+
+@dataclass(frozen=True)
+class Project:
+    name: str
+    url: str
+    sitemap: str
+    domains: tuple[Domain, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class Config:
+    settings: Settings
+    projects: tuple[Project, ...]
+
+
+def telegram_credentials() -> tuple[str, str]:
+    load_dotenv()
+    try:
+        return os.environ["TELEGRAM_TOKEN"], os.environ["TELEGRAM_CHANNEL_ID"]
+    except KeyError as e:
+        raise ConfigError(f"Environment variable {e.args[0]} is required") from None
+
+
+def _parse_settings(raw: dict) -> Settings:
+    known = {f.name: f.type for f in fields(Settings)}
+    unknown = set(raw) - set(known)
+    if unknown:
+        raise ConfigError(f"Unknown [settings] keys: {', '.join(sorted(unknown))}")
+    for key, value in raw.items():
+        expected = bool if known[key] in (bool, "bool") else int
+        if type(value) is not expected:
+            raise ConfigError(f"[settings] {key} must be {expected.__name__}")
+    settings = Settings(**raw)
+    if settings.domain_critical_days > settings.domain_warn_days:
+        raise ConfigError("domain_critical_days must not exceed domain_warn_days")
+    if settings.ssl_critical_days > settings.ssl_warn_days:
+        raise ConfigError("ssl_critical_days must not exceed ssl_warn_days")
+    return settings
+
+
+def _require_str(raw: dict, key: str, where: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where}: '{key}' is required and must be a string")
+    return value.strip()
+
+
+def _parse_str_list(raw: dict, key: str, where: str) -> tuple[str, ...]:
+    value = raw.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(f"{where}: '{key}' must be a list of strings")
+    return tuple(v.strip().lower() for v in value if v.strip())
+
+
+def _parse_domain(raw: dict, project: str) -> Domain:
+    name = _require_str(raw, "name", f"project '{project}' domain").lower()
+    where = f"project '{project}' domain '{name}'"
+    hosts = _parse_str_list(raw, "hosts", where) or (name,)
+    expiry = raw.get("expiry_fallback")
+    if isinstance(expiry, date):
+        expiry = expiry.isoformat()
+    if expiry is not None:
+        try:
+            date.fromisoformat(expiry)
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"{where}: 'expiry_fallback' must be a date string YYYY-MM-DD"
+            ) from None
+    return Domain(
+        name=name,
+        hosts=hosts,
+        nameservers=_parse_str_list(raw, "nameservers", where),
+        expiry_fallback=expiry,
+    )
+
+
+def _parse_project(raw: dict) -> Project:
+    name = _require_str(raw, "name", "project")
+    url = _require_str(raw, "url", f"project '{name}'").rstrip("/")
+    sitemap = raw.get("sitemap") or f"{url}/sitemap.xml"
+    domains = tuple(_parse_domain(d, name) for d in raw.get("domain", []))
+    return Project(name=name, url=url, sitemap=sitemap, domains=domains)
+
+
+def load_config(path: str | Path | None = None) -> Config:
+    config_path = Path(
+        path or os.environ.get("SITEPULSE_CONFIG") or DEFAULT_CONFIG_PATH
+    )
+    try:
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+    except FileNotFoundError:
+        raise ConfigError(f"Config file not found: {config_path}") from None
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"Invalid TOML in {config_path}: {e}") from None
+
+    projects = tuple(_parse_project(p) for p in raw.get("project", []))
+    if not projects:
+        raise ConfigError("At least one [[project]] is required")
+    names = [p.name for p in projects]
+    if len(set(names)) != len(names):
+        raise ConfigError("Project names must be unique")
+
+    return Config(settings=_parse_settings(raw.get("settings", {})), projects=projects)

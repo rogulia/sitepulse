@@ -5,10 +5,10 @@ from datetime import datetime, timedelta
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LOG_RETENTION_DAYS, LOG_FILE
+from config import LOG_FILE, load_config
 
 
-def clean_old_logs(log_file_path, days_to_keep=LOG_RETENTION_DAYS):
+def clean_old_logs(log_file_path, days_to_keep):
     current_date = datetime.now()
     cutoff_date = current_date - timedelta(days=days_to_keep)
 
@@ -40,4 +40,4 @@ if __name__ == "__main__":
         print(f"Error: file {LOG_FILE} not found")
         exit(1)
 
-    clean_old_logs(LOG_FILE)
+    clean_old_logs(LOG_FILE, load_config().settings.log_retention_days)

@@ -1,0 +1,36 @@
+# Copy to config.toml and edit. Secrets (TELEGRAM_TOKEN, TELEGRAM_CHANNEL_ID)
+# stay in the environment / .env, not in this file.
+
+# Every key is optional; values shown are the defaults.
+[settings]
+min_response_size = 1000        # bytes; smaller responses are errors
+connect_timeout = 20            # seconds
+read_timeout = 60               # seconds
+slow_response_threshold = 10    # seconds; slower responses are warnings
+max_workers = 10
+notify_success = false
+notify_warning = false
+notify_error = true
+domain_warn_days = 60           # warn when registration expires within N days
+domain_critical_days = 14       # critical within N days
+ssl_warn_days = 21
+ssl_critical_days = 7
+log_retention_days = 10
+
+[[project]]
+name = "example"
+url = "https://example.com"
+# sitemap = "https://example.com/sitemap.xml"   # default: <url>/sitemap.xml
+
+  # A project can have any number of domains.
+  [[project.domain]]
+  name = "example.com"
+  # Hosts whose SSL certificate is checked (default: the domain itself).
+  hosts = ["example.com", "www.example.com"]
+  # Alert if the registry reports none of these nameservers (optional).
+  nameservers = ["ns1.example.net", "ns2.example.net"]
+  # Used only when RDAP and WHOIS both fail (optional).
+  expiry_fallback = "2027-03-01"
+
+  [[project.domain]]
+  name = "example.org"
