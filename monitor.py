@@ -6,7 +6,7 @@ import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 import requests
 
@@ -21,6 +21,13 @@ from config import (
     load_config,
 )
 from sitemap import fetch_sitemap_urls
+from state import (
+    append_run,
+    format_duration,
+    load_state,
+    reconcile,
+    save_state,
+)
 from telegram import send_message
 
 logger = logging.getLogger("sitepulse")
@@ -211,13 +218,83 @@ def build_project_report(
     return "\n\n".join(blocks)
 
 
+KEY_SEPARATOR = "\t"
+
+
+def process_outcomes(
+    state_name: str,
+    config: Config,
+    outcomes: dict[str, list[tuple[str, tuple[str, bool, bool, bool]]]],
+    totals: dict[str, int],
+    blocks: list[str],
+) -> None:
+    """Report new failures, reminders and recoveries; persist the failure state.
+
+    `outcomes` maps a project name to (url, check result) pairs. A failure already
+    reported is silent until the reminder interval passes or it recovers.
+    """
+    settings = config.settings
+    now = datetime.now(dt_timezone.utc)
+    data = load_state(state_name)
+
+    probed = {}
+    for project_name, items in outcomes.items():
+        for url, result in items:
+            probed[f"{project_name}{KEY_SEPARATOR}{url}"] = result
+    current = {key: result[0] for key, result in probed.items() if result[3]}
+    transitions = reconcile(data["failing"], current, set(probed), now)
+
+    for project in config.projects:
+        results = []
+        for key, result in probed.items():
+            if not key.startswith(project.name + KEY_SEPARATOR):
+                continue
+            if result[3]:
+                kind = transitions.alerts.get(key)
+                if kind is None:
+                    continue
+                if kind == "reminder":
+                    since = datetime.fromisoformat(transitions.failing[key]["since"])
+                    prefix = f"🔁 Still failing for {format_duration(now - since)}\n"
+                    result = (prefix + result[0], *result[1:])
+            results.append(result)
+        report = build_project_report(
+            project.name, totals[project.name], results, settings
+        )
+        if report:
+            blocks.append(report)
+
+        if settings.notify_error:
+            recovered = [
+                f"- {html.escape(key.split(KEY_SEPARATOR, 1)[1])} "
+                f"(failing for {format_duration(downtime)})"
+                for key, downtime in transitions.recovered.items()
+                if key.startswith(project.name + KEY_SEPARATOR)
+            ]
+            if recovered:
+                blocks.append(
+                    f"✅ <b>{html.escape(project.name)}</b>: recovered\n"
+                    + "\n".join(recovered)
+                )
+
+    timestamp = now.strftime("%d.%m.%Y %H:%M:%S")
+    delivered = True
+    if blocks:
+        delivered = send_message(f"📅 {timestamp} UTC\n\n" + "\n\n".join(blocks))
+
+    # An undelivered report keeps the old failure state, so it is raised again next run.
+    if delivered:
+        data["failing"] = transitions.failing
+    append_run(data, now, checked=len(probed), failed=len(current))
+    save_state(state_name, data)
+
+
 def check_pages(config: Config) -> None:
     """Check all pages from every project's sitemap."""
     settings = config.settings
-    timestamp = datetime.now(dt_timezone.utc).strftime("%d.%m.%Y %H:%M:%S")
     blocks = []
     totals = {}
-    results = {project.name: [] for project in config.projects}
+    outcomes = {project.name: [] for project in config.projects}
 
     with requests.Session() as session:
 
@@ -225,7 +302,7 @@ def check_pages(config: Config) -> None:
             return check_single_page(url, session, settings)
 
         with ThreadPoolExecutor(max_workers=settings.max_workers) as executor:
-            future_to_project = {}
+            future_to_probe = {}
             for project in config.projects:
                 urls, problems = collect_urls(project, settings)
                 totals[project.name] = len(urls)
@@ -235,22 +312,14 @@ def check_pages(config: Config) -> None:
                         f"🚨 <b>{html.escape(project.name)}</b>: sitemap problems\n{lines}"
                     )
                 for url in urls:
-                    future_to_project[executor.submit(check_with_session, url)] = (
-                        project
-                    )
+                    future = executor.submit(check_with_session, url)
+                    future_to_probe[future] = (project, url)
 
-            for future in concurrent.futures.as_completed(future_to_project):
-                results[future_to_project[future].name].append(future.result())
+            for future in concurrent.futures.as_completed(future_to_probe):
+                project, url = future_to_probe[future]
+                outcomes[project.name].append((url, future.result()))
 
-    for project in config.projects:
-        report = build_project_report(
-            project.name, totals[project.name], results[project.name], settings
-        )
-        if report:
-            blocks.append(report)
-
-    if blocks:
-        send_message(f"📅 {timestamp} UTC\n\n" + "\n\n".join(blocks))
+    process_outcomes("pages", config, outcomes, totals, blocks)
 
 
 HEALTH_USER_AGENT = "SitePulse-health/1.0"
@@ -298,105 +367,70 @@ def check_health_url(
 def check_health(config: Config) -> None:
     """Probe the health endpoints of every project."""
     settings = config.settings
-    timestamp = datetime.now(dt_timezone.utc).strftime("%d.%m.%Y %H:%M:%S")
-    probes = [(p, url) for p in config.projects for url in p.health]
-    results = {project.name: [] for project in config.projects}
+    outcomes = {project.name: [] for project in config.projects}
+    totals = {project.name: len(project.health) for project in config.projects}
 
     with requests.Session() as session:
         with ThreadPoolExecutor(max_workers=settings.max_workers) as executor:
             futures = {
-                executor.submit(check_health_url, url, session, settings): project
-                for project, url in probes
+                executor.submit(check_health_url, url, session, settings): (
+                    project,
+                    url,
+                )
+                for project in config.projects
+                for url in project.health
             }
             for future in concurrent.futures.as_completed(futures):
-                results[futures[future].name].append(future.result())
+                project, url = futures[future]
+                outcomes[project.name].append((url, future.result()))
 
-    blocks = []
-    for project in config.projects:
-        total = len(project.health)
-        report = build_project_report(
-            project.name, total, results[project.name], settings
+    process_outcomes("health", config, outcomes, totals, [])
+
+
+SUMMARY_MODES = (("Health", "health"), ("Pages", "pages"))
+MAX_SUMMARY_FAILURES = 10
+
+
+def build_summary(now: datetime) -> str:
+    """Summarize the last 24 hours from the stored run history."""
+    lines = []
+    for label, name in SUMMARY_MODES:
+        data = load_state(name)
+        if not data["runs"]:
+            continue
+        cutoff = now - timedelta(hours=24)
+        runs = [r for r in data["runs"] if datetime.fromisoformat(r["ts"]) >= cutoff]
+        if not runs:
+            lines.append(f"⚠️ {label}: no runs in the last 24 hours")
+            continue
+        failed_runs = sum(1 for r in runs if r["failed"])
+        healthy = not failed_runs and not data["failing"]
+        lines.append(
+            f"{'✅' if healthy else '⚠️'} {label}: {len(runs)} runs, "
+            f"{failed_runs} with failures"
         )
-        if report:
-            blocks.append(report)
-    if blocks:
-        send_message(f"📅 {timestamp} UTC\n\n" + "\n\n".join(blocks))
+        for key, entry in list(data["failing"].items())[:MAX_SUMMARY_FAILURES]:
+            project, _, url = key.partition(KEY_SEPARATOR)
+            since = datetime.fromisoformat(entry["since"]).strftime("%d.%m.%Y %H:%M")
+            lines.append(
+                f"- failing: {html.escape(project)} {html.escape(url)} since {since} UTC"
+            )
+        hidden = len(data["failing"]) - MAX_SUMMARY_FAILURES
+        if hidden > 0:
+            lines.append(f"… and {hidden} more failing")
+
+    header = f"📊 Daily Summary ({now.strftime('%d.%m.%Y')})"
+    if not lines:
+        return header + "\n\n⚠️ No monitoring data found"
+    return header + "\n\n" + "\n".join(lines)
 
 
 def send_daily_summary(config: Config) -> None:
-    """Send a daily summary report via Telegram."""
+    """Send the daily summary built from stored run history."""
     from utils.clean_logs import clean_old_logs
 
     clean_old_logs(LOG_FILE, config.settings.log_retention_days)
-
-    try:
-        logger.info("Starting daily summary generation...")
-
-        with open(LOG_FILE, "r") as f:
-            log_lines = f.readlines()
-
-        logger.info(f"Read {len(log_lines)} lines from log file")
-
-        # Filter logs from the last 24 hours
-        current_time = datetime.now(dt_timezone.utc)
-        logger.info(f"Current time: {current_time}")
-
-        recent_logs = []
-        has_errors = False
-
-        for line in log_lines:
-            try:
-                # Parse timestamp and attach timezone
-                timestamp = line.split(" - ")[0]
-                # Strip milliseconds before parsing
-                timestamp = timestamp.split(",")[0]
-                log_time = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                log_time = log_time.replace(tzinfo=dt_timezone.utc)
-
-                time_diff = current_time - log_time
-                seconds_diff = time_diff.total_seconds()
-
-                logger.debug(f"Log time: {log_time}, diff: {seconds_diff} seconds")
-
-                if seconds_diff < 24 * 3600:  # 24 hours in seconds
-                    recent_logs.append(line)
-                    if "ERROR" in line:
-                        has_errors = True
-            except Exception as e:
-                logger.error(f"Error parsing log line '{line.strip()}': {e}")
-                continue
-
-        logger.info(
-            f"Found {len(recent_logs)} logs in last 24 hours, has_errors: {has_errors}"
-        )
-
-        if recent_logs:
-            if not has_errors:
-                message = (
-                    f"📊 Daily Summary ({current_time.strftime('%d.%m.%Y')})\n\n"
-                    f"✅ All pages worked correctly during the last 24 hours.\n"
-                    f"📝 Total checks: {len(recent_logs)}"
-                )
-                logger.info("Sending success summary to Telegram")
-                send_message(message)
-            else:
-                message = (
-                    f"⚠️ Daily Summary ({current_time.strftime('%d.%m.%Y')})\n\n"
-                    f"❌ Found errors in monitoring during last 24 hours.\n"
-                    f"📝 Total checks: {len(recent_logs)}"
-                )
-                logger.info("Sending error summary to Telegram")
-                send_message(message)
-        else:
-            message = (
-                f"⚠️ Daily Summary ({current_time.strftime('%d.%m.%Y')})\n\n"
-                f"No monitoring data found for the last 24 hours!"
-            )
-            logger.info("Sending no-data summary to Telegram")
-            send_message(message)
-
-    except Exception as e:
-        logger.error(f"Error creating daily summary: {e}", exc_info=True)
+    send_message(build_summary(datetime.now(dt_timezone.utc)))
 
 
 def check_expiry(config: Config) -> None:

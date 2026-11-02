@@ -24,6 +24,7 @@ python monitor.py
 - **Multiple projects** — one config describes any number of projects, each with its own sitemap and domains
 - **Domain monitoring** — registration expiry via RDAP with WHOIS fallback, and optional nameserver check
 - **SSL monitoring** — certificate expiry and validity (chain, hostname) for every configured host
+- **Alert state** — a failing page or endpoint is reported once, repeated after 24 hours if it keeps failing, and a recovery message follows when it is back
 - **Telegram alerts** — sends notifications configurable in `config.toml` (`notify_error`, `notify_warning`, `notify_success`)
 - **Daily summaries** — generates a 24-hour report and sends it to Telegram
 - **Log management** — UTC log timestamps, automatic log rotation with configurable retention period
@@ -119,11 +120,15 @@ python monitor.py
 
 ### Daily summary
 
-Cleans old log entries, then analyzes the last 24 hours and sends a summary to Telegram. Ideal for a once-a-day cron job.
+Cleans old log entries, then sends a summary of the last 24 hours built from the stored run history: runs per check, runs with failures, and what is failing now. A check with no runs in the last 24 hours is reported as such. Ideal for a once-a-day cron job.
 
 ```bash
 python monitor.py --daily-summary
 ```
+
+### Alert state
+
+`--check-health` and the page check keep their state in `state/health.json` and `state/pages.json` (override the directory with `SITEPULSE_STATE_DIR`). A new failure is sent immediately; while it persists it is repeated every 24 hours; when the URL passes again a recovery message with the downtime is sent. If a message cannot be delivered, the failure is raised again on the next run. The same files hold the last 48 hours of runs used by the daily summary. Domain and SSL expiry checks keep no state: a persisting problem is reported on every run.
 
 ### Health check
 
@@ -151,7 +156,7 @@ python utils/analyzer.py
 
 ### Manual log cleanup
 
-Removes log entries older than `LOG_RETENTION_DAYS`. This also runs automatically as part of `--daily-summary`.
+Removes log entries older than `log_retention_days`. This also runs automatically as part of `--daily-summary`.
 
 ```bash
 python utils/clean_logs.py
@@ -189,14 +194,15 @@ SitePulse ships as a composite action, so you can run it from a separate private
 3. Copy the workflows from [examples/github-actions](examples/github-actions) to `.github/workflows/`:
    - `health.yml` — health endpoints every 30 minutes;
    - `pages.yml` — full sitemap crawl once a day;
+   - `summary.yml` — daily summary;
    - `expiry.yml` — domain and SSL expiry check once a day.
 4. Pin the action to a release tag (`rogulia/sitepulse@v1`) or a commit SHA.
 
-Inputs of the action: `mode` (`pages`, `health` or `expiry`), `config` (path to the TOML file, default `config.toml`), `telegram-token`, `telegram-channel-id`.
+Inputs of the action: `mode` (`pages`, `health`, `expiry` or `summary`), `config` (path to the TOML file, default `config.toml`), `telegram-token`, `telegram-channel-id`.
 
 A sitemap crawl requests every URL twice (desktop and mobile), so on large sites run it less often than the health check. Each scheduled run consumes at least one billable minute on private repositories.
 
-GitHub runners are ephemeral, so the log file does not persist between runs and `--daily-summary` is not available there. Scheduled runs can start a few minutes late.
+GitHub runners are ephemeral, so the `pages` and `health` modes store their state in a `state` branch of the calling repository: one parentless commit, replaced on every run (these workflows need `permissions: contents: write`). The `summary` mode reads that branch. Scheduled runs can start a few minutes late.
 
 ## Telegram Alert Examples
 
@@ -232,13 +238,23 @@ Error: Response code: 500
 - www.example.com: SSL certificate expires in 5 days (07.11.2026)
 ```
 
-**Daily summary (no errors):**
+**Daily summary:**
 
 ```
 📊 Daily Summary (23.03.2026)
 
-✅ All pages worked correctly during the last 24 hours.
-📝 Total checks: 384
+✅ Health: 48 runs, 0 with failures
+⚠️ Pages: 1 runs, 1 with failures
+- failing: example https://example.com/broken since 23.03.2026 05:05 UTC
+```
+
+**Recovery:**
+
+```
+📅 23.03.2026 11:35:02 UTC
+
+✅ example: recovered
+- https://example.com/broken (failing for 6h 30m)
 ```
 
 ## Tests

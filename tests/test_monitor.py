@@ -2,7 +2,7 @@ import pytest
 import requests
 
 import monitor
-from config import Project, Settings
+from config import Config, Project, Settings
 from sitemap import SitemapResult
 
 ERR = ("🚨 URL: x", False, False, True)
@@ -100,3 +100,60 @@ def test_health_failure_after_retry_is_error_and_escaped(no_sleep):
     assert is_error and not is_success
     assert "x=1&amp;y=2" in message
     assert "Response code: 503" in message
+
+
+@pytest.fixture
+def state_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("SITEPULSE_STATE_DIR", str(tmp_path))
+    return tmp_path
+
+
+def run_outcomes(monkeypatch, outcomes, deliver=True):
+    sent = []
+    monkeypatch.setattr(
+        monitor, "send_message", lambda text: sent.append(text) or deliver
+    )
+    project = Project("p", "https://a.com", "https://a.com/sitemap.xml")
+    config = Config(Settings(), (project,))
+    totals = {"p": len(outcomes)}
+    monitor.process_outcomes("health", config, {"p": outcomes}, totals, [])
+    return sent
+
+
+DOWN = ("🚨 Health: x", False, False, True)
+UP = ("✅ Health: x", True, False, False)
+
+
+def test_failure_alerts_once_then_recovery(state_dir, monkeypatch):
+    first = run_outcomes(monkeypatch, [("https://a.com/h", DOWN)])
+    second = run_outcomes(monkeypatch, [("https://a.com/h", DOWN)])
+    third = run_outcomes(monkeypatch, [("https://a.com/h", UP)])
+    fourth = run_outcomes(monkeypatch, [("https://a.com/h", UP)])
+
+    assert len(first) == 1 and "🚨 Health" in first[0]
+    assert second == []
+    assert len(third) == 1 and "recovered" in third[0] and "https://a.com/h" in third[0]
+    assert fourth == []
+
+
+def test_undelivered_alert_is_raised_again(state_dir, monkeypatch):
+    run_outcomes(monkeypatch, [("https://a.com/h", DOWN)], deliver=False)
+    retry = run_outcomes(monkeypatch, [("https://a.com/h", DOWN)])
+    assert len(retry) == 1 and "🚨 Health" in retry[0]
+
+
+def test_runs_are_recorded_and_summarized(state_dir, monkeypatch):
+    run_outcomes(monkeypatch, [("https://a.com/h", UP)])
+    run_outcomes(monkeypatch, [("https://a.com/h", DOWN)])
+
+    now = monitor.datetime.now(monitor.dt_timezone.utc)
+    summary = monitor.build_summary(now)
+
+    assert "Health: 2 runs, 1 with failures" in summary
+    assert "failing: p https://a.com/h" in summary
+    assert "Pages" not in summary
+
+
+def test_summary_without_data(state_dir):
+    now = monitor.datetime.now(monitor.dt_timezone.utc)
+    assert "No monitoring data found" in monitor.build_summary(now)

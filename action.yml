@@ -1,8 +1,8 @@
 name: SitePulse
-description: Run a SitePulse check (pages, health or expiry) with a config file from the calling repository.
+description: Run a SitePulse check (pages, health, expiry or summary) with a config file from the calling repository.
 inputs:
   mode:
-    description: "Check to run: `pages`, `health` or `expiry`."
+    description: "Check to run: `pages`, `health`, `expiry` or `summary`."
     required: true
   config:
     description: Path to the TOML config in the calling repository.
@@ -22,11 +22,17 @@ runs:
     - name: Install dependencies
       shell: bash
       run: python -m pip install --disable-pip-version-check -r "${{ github.action_path }}/requirements.txt"
+    - name: Restore state
+      shell: bash
+      env:
+        SITEPULSE_STATE_DIR: ${{ runner.temp }}/sitepulse/state
+      run: '"${{ github.action_path }}/scripts/state-sync.sh" pull'
     - name: Run SitePulse
       shell: bash
       env:
         MODE: ${{ inputs.mode }}
         SITEPULSE_CONFIG: ${{ github.workspace }}/${{ inputs.config }}
+        SITEPULSE_STATE_DIR: ${{ runner.temp }}/sitepulse/state
         TELEGRAM_TOKEN: ${{ inputs.telegram-token }}
         TELEGRAM_CHANNEL_ID: ${{ inputs.telegram-channel-id }}
       run: |
@@ -34,6 +40,14 @@ runs:
           pages) flag=() ;;
           health) flag=(--check-health) ;;
           expiry) flag=(--check-expiry) ;;
-          *) echo "Unknown mode: $MODE (expected pages, health or expiry)" >&2; exit 2 ;;
+          summary) flag=(--daily-summary) ;;
+          *) echo "Unknown mode: $MODE (expected pages, health, expiry or summary)" >&2; exit 2 ;;
         esac
         python "${{ github.action_path }}/monitor.py" "${flag[@]}"
+    - name: Save state
+      if: ${{ !cancelled() && (inputs.mode == 'pages' || inputs.mode == 'health') }}
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        SITEPULSE_STATE_DIR: ${{ runner.temp }}/sitepulse/state
+      run: '"${{ github.action_path }}/scripts/state-sync.sh" push "$MODE.json"'
