@@ -2,7 +2,7 @@ name: Pages
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "5 5 * * *"
   workflow_dispatch:
 
 permissions:

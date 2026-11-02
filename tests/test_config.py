@@ -61,6 +61,29 @@ def test_invalid_config_is_rejected(tmp_path, text):
         load_config(write(tmp_path, text))
 
 
+def test_health_urls_keep_case_and_default_to_empty(tmp_path):
+    config = load_config(
+        write(
+            tmp_path,
+            "[[project]]\nname='a'\nurl='https://a.com'\n"
+            "health=['https://a.com/Health']\n"
+            "[[project]]\nname='b'\nurl='https://b.com'\n",
+        )
+    )
+    assert config.projects[0].health == ("https://a.com/Health",)
+    assert config.projects[1].health == ()
+
+
+def test_health_url_must_be_http(tmp_path):
+    with pytest.raises(ConfigError):
+        load_config(
+            write(
+                tmp_path,
+                "[[project]]\nname='a'\nurl='https://a.com'\nhealth=['/health']\n",
+            )
+        )
+
+
 def test_missing_file(tmp_path):
     with pytest.raises(ConfigError):
         load_config(tmp_path / "missing.toml")

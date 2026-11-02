@@ -47,6 +47,7 @@ class Project:
     url: str
     sitemap: str
     domains: tuple[Domain, ...] = field(default_factory=tuple)
+    health: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,11 +88,15 @@ def _require_str(raw: dict, key: str, where: str) -> str:
     return value.strip()
 
 
-def _parse_str_list(raw: dict, key: str, where: str) -> tuple[str, ...]:
+def _parse_str_list(
+    raw: dict, key: str, where: str, lower: bool = True
+) -> tuple[str, ...]:
     value = raw.get(key, [])
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ConfigError(f"{where}: '{key}' must be a list of strings")
-    return tuple(v.strip().lower() for v in value if v.strip())
+    return tuple(
+        (v.strip().lower() if lower else v.strip()) for v in value if v.strip()
+    )
 
 
 def _parse_domain(raw: dict, project: str) -> Domain:
@@ -121,7 +126,13 @@ def _parse_project(raw: dict) -> Project:
     url = _require_str(raw, "url", f"project '{name}'").rstrip("/")
     sitemap = raw.get("sitemap") or f"{url}/sitemap.xml"
     domains = tuple(_parse_domain(d, name) for d in raw.get("domain", []))
-    return Project(name=name, url=url, sitemap=sitemap, domains=domains)
+    health = _parse_str_list(raw, "health", f"project '{name}'", lower=False)
+    for health_url in health:
+        if not health_url.startswith(("http://", "https://")):
+            raise ConfigError(
+                f"project '{name}': health URL must start with http:// or https://"
+            )
+    return Project(name=name, url=url, sitemap=sitemap, domains=domains, health=health)
 
 
 def load_config(path: str | Path | None = None) -> Config:

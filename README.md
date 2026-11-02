@@ -96,6 +96,7 @@ See [config.example.toml](config.example.toml) for a complete template.
 | `name` | Unique project name, shown in alerts |
 | `url` | Base URL of the site |
 | `sitemap` | Optional; default `<url>/sitemap.xml` |
+| `health` | Optional list of health endpoint URLs, probed by `--check-health` (any 2xx is healthy, one retry) |
 
 `[[project.domain]]` (repeat for each domain of the project):
 
@@ -122,6 +123,14 @@ Cleans old log entries, then analyzes the last 24 hours and sends a summary to T
 
 ```bash
 python monitor.py --daily-summary
+```
+
+### Health check
+
+Probes the `health` URLs of every project. Only failures are sent (and slow responses when `notify_warning = true`).
+
+```bash
+python monitor.py --check-health
 ```
 
 ### Expiry check
@@ -178,11 +187,14 @@ SitePulse ships as a composite action, so you can run it from a separate private
 1. Create a private repository and add your `config.toml` (see [config.example.toml](config.example.toml)).
 2. In that repository, add the secrets `TELEGRAM_TOKEN` and `TELEGRAM_CHANNEL_ID` (Settings → Secrets and variables → Actions).
 3. Copy the workflows from [examples/github-actions](examples/github-actions) to `.github/workflows/`:
-   - `pages.yml` — page checks every 30 minutes;
+   - `health.yml` — health endpoints every 30 minutes;
+   - `pages.yml` — full sitemap crawl once a day;
    - `expiry.yml` — domain and SSL expiry check once a day.
 4. Pin the action to a release tag (`rogulia/sitepulse@v1`) or a commit SHA.
 
-Inputs of the action: `mode` (`pages` or `expiry`), `config` (path to the TOML file, default `config.toml`), `telegram-token`, `telegram-channel-id`.
+Inputs of the action: `mode` (`pages`, `health` or `expiry`), `config` (path to the TOML file, default `config.toml`), `telegram-token`, `telegram-channel-id`.
+
+A sitemap crawl requests every URL twice (desktop and mobile), so on large sites run it less often than the health check. Each scheduled run consumes at least one billable minute on private repositories.
 
 GitHub runners are ephemeral, so the log file does not persist between runs and `--daily-summary` is not available there. Scheduled runs can start a few minutes late.
 

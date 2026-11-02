@@ -1,3 +1,6 @@
+import pytest
+import requests
+
 import monitor
 from config import Project, Settings
 from sitemap import SitemapResult
@@ -45,3 +48,55 @@ def test_collect_urls_empty_sitemap_is_a_problem(monkeypatch):
 
     assert urls == ["https://a.com"]
     assert "no URLs" in problems[0]
+
+
+class FakeSession:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = 0
+
+    def get(self, url, **_):
+        self.calls += 1
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class Resp:
+    def __init__(self, status):
+        self.status_code = status
+        self.ok = status < 400
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    monkeypatch.setattr(monitor.time, "sleep", lambda _: None)
+
+
+def test_health_ok(no_sleep):
+    session = FakeSession([Resp(200)])
+    message, is_success, is_warning, is_error = monitor.check_health_url(
+        "https://a.com/health", session, Settings()
+    )
+    assert (is_success, is_warning, is_error) == (True, False, False)
+    assert session.calls == 1
+
+
+def test_health_recovers_on_retry(no_sleep):
+    session = FakeSession([Resp(503), Resp(200)])
+    _, is_success, _, is_error = monitor.check_health_url(
+        "https://a.com/health", session, Settings()
+    )
+    assert is_success and not is_error
+    assert session.calls == 2
+
+
+def test_health_failure_after_retry_is_error_and_escaped(no_sleep):
+    session = FakeSession([requests.ConnectionError("a<b"), Resp(503)])
+    message, is_success, _, is_error = monitor.check_health_url(
+        "https://a.com/health?x=1&y=2", session, Settings()
+    )
+    assert is_error and not is_success
+    assert "x=1&amp;y=2" in message
+    assert "Response code: 503" in message

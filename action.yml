@@ -1,8 +1,8 @@
 name: SitePulse
-description: Run a SitePulse check (pages or expiry) with a config file from the calling repository.
+description: Run a SitePulse check (pages, health or expiry) with a config file from the calling repository.
 inputs:
   mode:
-    description: "Check to run: `pages` or `expiry`."
+    description: "Check to run: `pages`, `health` or `expiry`."
     required: true
   config:
     description: Path to the TOML config in the calling repository.
@@ -32,7 +32,8 @@ runs:
       run: |
         case "$MODE" in
           pages) flag=() ;;
+          health) flag=(--check-health) ;;
           expiry) flag=(--check-expiry) ;;
-          *) echo "Unknown mode: $MODE (expected pages or expiry)" >&2; exit 2 ;;
+          *) echo "Unknown mode: $MODE (expected pages, health or expiry)" >&2; exit 2 ;;
         esac
         python "${{ github.action_path }}/monitor.py" "${flag[@]}"

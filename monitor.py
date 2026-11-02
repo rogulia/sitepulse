@@ -253,6 +253,76 @@ def check_pages(config: Config) -> None:
         send_message(f"📅 {timestamp} UTC\n\n" + "\n\n".join(blocks))
 
 
+HEALTH_USER_AGENT = "SitePulse-health/1.0"
+HEALTH_RETRY_DELAY = 5
+
+
+def check_health_url(
+    url: str, session: requests.Session, settings: Settings
+) -> tuple[str, bool, bool, bool]:
+    """Probe a health endpoint: any 2xx is healthy, one retry on failure."""
+    error = None
+    for attempt in (1, 2):
+        start = time.time()
+        try:
+            response = session.get(
+                url,
+                timeout=(settings.connect_timeout, settings.read_timeout),
+                headers={"User-Agent": HEALTH_USER_AGENT},
+            )
+            elapsed = time.time() - start
+            if response.ok:
+                logger.info(
+                    f"Health {url} - status {response.status_code}, time {elapsed:.2f} sec"
+                )
+                is_slow = elapsed > settings.slow_response_threshold
+                emoji = "⚠️" if is_slow else "✅"
+                detail = f"Response time: {elapsed:.2f} sec" + (
+                    f" (threshold {settings.slow_response_threshold} sec exceeded)"
+                    if is_slow
+                    else ""
+                )
+                message = f"{emoji} Health: {html.escape(url)}\n{detail}"
+                return message, not is_slow, is_slow, False
+            error = f"Response code: {response.status_code}"
+        except requests.RequestException as e:
+            error = f"{type(e).__name__}: {e}"
+        if attempt == 1:
+            time.sleep(HEALTH_RETRY_DELAY)
+
+    logger.error(f"Health check failed {url}: {error}")
+    message = f"🚨 Health: {html.escape(url)}\nError: {html.escape(error)}"
+    return message, False, False, True
+
+
+def check_health(config: Config) -> None:
+    """Probe the health endpoints of every project."""
+    settings = config.settings
+    timestamp = datetime.now(dt_timezone.utc).strftime("%d.%m.%Y %H:%M:%S")
+    probes = [(p, url) for p in config.projects for url in p.health]
+    results = {project.name: [] for project in config.projects}
+
+    with requests.Session() as session:
+        with ThreadPoolExecutor(max_workers=settings.max_workers) as executor:
+            futures = {
+                executor.submit(check_health_url, url, session, settings): project
+                for project, url in probes
+            }
+            for future in concurrent.futures.as_completed(futures):
+                results[futures[future].name].append(future.result())
+
+    blocks = []
+    for project in config.projects:
+        total = len(project.health)
+        report = build_project_report(
+            project.name, total, results[project.name], settings
+        )
+        if report:
+            blocks.append(report)
+    if blocks:
+        send_message(f"📅 {timestamp} UTC\n\n" + "\n\n".join(blocks))
+
+
 def send_daily_summary(config: Config) -> None:
     """Send a daily summary report via Telegram."""
     from utils.clean_logs import clean_old_logs
@@ -346,6 +416,11 @@ def main() -> None:
         "--daily-summary", action="store_true", help="send the 24h summary"
     )
     mode.add_argument(
+        "--check-health",
+        action="store_true",
+        help="probe the health endpoints listed in the config",
+    )
+    mode.add_argument(
         "--check-expiry",
         action="store_true",
         help="check domain registration and SSL certificate expiry",
@@ -360,6 +435,8 @@ def main() -> None:
 
     if args.daily_summary:
         send_daily_summary(config)
+    elif args.check_health:
+        check_health(config)
     elif args.check_expiry:
         check_expiry(config)
     else:
