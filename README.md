@@ -48,7 +48,9 @@ sitepulse/
 │   └── clean_logs.py    — log rotation utility
 ├── logs/                — log files (created automatically)
 ├── .env.example         — environment variable template
-├── requirements.txt     — Python dependencies
+├── requirements.in      — direct dependencies
+├── requirements.txt     — pinned dependencies (generated from requirements.in)
+├── action.yml           — composite GitHub Action
 └── README.md
 ```
 
@@ -168,6 +170,21 @@ Example schedule:
 ```
 
 Replace `/path/to/sitepulse` with the actual path to the project directory.
+
+## Run on GitHub Actions
+
+SitePulse ships as a composite action, so you can run it from a separate private repository that holds only your `config.toml` and the schedule. Your domains and URLs stay out of this public repository and out of public workflow logs.
+
+1. Create a private repository and add your `config.toml` (see [config.example.toml](config.example.toml)).
+2. In that repository, add the secrets `TELEGRAM_TOKEN` and `TELEGRAM_CHANNEL_ID` (Settings → Secrets and variables → Actions).
+3. Copy the workflows from [examples/github-actions](examples/github-actions) to `.github/workflows/`:
+   - `pages.yml` — page checks every 30 minutes;
+   - `expiry.yml` — domain and SSL expiry check once a day.
+4. Pin the action to a release tag (`rogulia/sitepulse@v1`) or a commit SHA.
+
+Inputs of the action: `mode` (`pages` or `expiry`), `config` (path to the TOML file, default `config.toml`), `telegram-token`, `telegram-channel-id`.
+
+GitHub runners are ephemeral, so the log file does not persist between runs and `--daily-summary` is not available there. Scheduled runs can start a few minutes late.
 
 ## Telegram Alert Examples
 

@@ -1,0 +1,38 @@
+name: SitePulse
+description: Run a SitePulse check (pages or expiry) with a config file from the calling repository.
+inputs:
+  mode:
+    description: "Check to run: `pages` or `expiry`."
+    required: true
+  config:
+    description: Path to the TOML config in the calling repository.
+    default: config.toml
+  telegram-token:
+    description: Telegram bot token.
+    required: true
+  telegram-channel-id:
+    description: Telegram chat or channel ID.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Install dependencies
+      shell: bash
+      run: python -m pip install --disable-pip-version-check -r "${{ github.action_path }}/requirements.txt"
+    - name: Run SitePulse
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        SITEPULSE_CONFIG: ${{ github.workspace }}/${{ inputs.config }}
+        TELEGRAM_TOKEN: ${{ inputs.telegram-token }}
+        TELEGRAM_CHANNEL_ID: ${{ inputs.telegram-channel-id }}
+      run: |
+        case "$MODE" in
+          pages) flag=() ;;
+          expiry) flag=(--check-expiry) ;;
+          *) echo "Unknown mode: $MODE (expected pages or expiry)" >&2; exit 2 ;;
+        esac
+        python "${{ github.action_path }}/monitor.py" "${flag[@]}"

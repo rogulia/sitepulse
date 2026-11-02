@@ -1,0 +1,25 @@
+name: Pages
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sitepulse-pages
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rogulia/sitepulse@v1
+        with:
+          mode: pages
+          telegram-token: ${{ secrets.TELEGRAM_TOKEN }}
+          telegram-channel-id: ${{ secrets.TELEGRAM_CHANNEL_ID }}
