@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -9,7 +9,7 @@ from config import LOG_FILE, load_config
 
 
 def clean_old_logs(log_file_path, days_to_keep):
-    current_date = datetime.now()
+    current_date = datetime.now(timezone.utc).replace(tzinfo=None)
     cutoff_date = current_date - timedelta(days=days_to_keep)
 
     with open(log_file_path, "r") as file:

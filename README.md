@@ -16,6 +16,8 @@ python monitor.py
 ## Features
 
 - **Page monitoring** — checks all URLs in `sitemap.xml` using desktop and mobile User-Agent headers
+- **Sitemap index support** — follows child sitemaps; sitemap failures are reported as alerts
+- **Compact alerts** — one report per project with a capped list of problem pages
 - **Parallel checks** — checks multiple pages concurrently using a thread pool
 - **Automatic retries** — retries failed requests once after a 5-second delay
 - **Response validation** — checks HTTP status codes, response sizes, and load times
@@ -24,7 +26,7 @@ python monitor.py
 - **SSL monitoring** — certificate expiry and validity (chain, hostname) for every configured host
 - **Telegram alerts** — sends notifications configurable in `config.toml` (`notify_error`, `notify_warning`, `notify_success`)
 - **Daily summaries** — generates a 24-hour report and sends it to Telegram
-- **Log management** — automatic log rotation with configurable retention period
+- **Log management** — UTC log timestamps, automatic log rotation with configurable retention period
 - **Performance analysis** — built-in tool to analyze logs and identify slowest, largest, and most unstable pages
 
 ## Project Structure
@@ -32,6 +34,8 @@ python monitor.py
 ```
 sitepulse/
 ├── monitor.py           — main script (page checks, daily summary, domain checks)
+├── telegram.py          — Telegram sending (splitting, retries, timeouts)
+├── sitemap.py           — sitemap and sitemap index parsing
 ├── config.py            — loads config.toml and secrets from the environment
 ├── checks/
 │   ├── domain.py        — registration expiry lookup (RDAP, WHOIS)

@@ -5,13 +5,10 @@ import logging
 import os
 import sys
 import time
-import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone as dt_timezone
-from typing import List
 
 import requests
-from pytz import timezone
 
 from checks.expiry import format_report, run_expiry_checks
 from config import (
@@ -19,10 +16,12 @@ from config import (
     LOG_FILE,
     Config,
     ConfigError,
+    Project,
     Settings,
     load_config,
-    telegram_credentials,
 )
+from sitemap import fetch_sitemap_urls
+from telegram import send_message
 
 logger = logging.getLogger("sitepulse")
 
@@ -31,6 +30,7 @@ def setup_logging() -> None:
     """Set up logging to file and console."""
     os.makedirs(LOG_DIR, exist_ok=True)
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    formatter.converter = time.gmtime
 
     file_handler = logging.FileHandler(LOG_FILE)
     file_handler.setFormatter(formatter)
@@ -66,151 +66,6 @@ MOBILE_HEADERS = {
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Dest": "empty",
 }
-
-
-def get_urls_from_sitemap(
-    sitemap_url: str, fallback_url: str, settings: Settings
-) -> List[str]:
-    """Fetch and parse URLs from a sitemap.xml, auto-detecting XML namespace."""
-    logger.debug(f"Fetching URLs from sitemap: {sitemap_url}")
-    try:
-        logger.debug(f"Sending request to {sitemap_url}")
-        response = requests.get(
-            sitemap_url, timeout=(settings.connect_timeout, settings.read_timeout)
-        )
-        response.raise_for_status()
-        logger.debug(
-            f"Response received: status {response.status_code}, size {len(response.content)} bytes"
-        )
-
-        # Parse XML
-        logger.debug("Parsing XML")
-        root = ET.fromstring(response.content)
-
-        # Detect namespace from the document
-        logger.debug("Detecting namespace")
-        root_attrs = root.attrib
-        logger.debug(f"Root element attributes: {root_attrs}")
-        logger.debug(f"Root element tag: {root.tag}")
-
-        # Extract namespace from the root element tag
-        namespace_uri = None
-        if "}" in root.tag:
-            namespace_uri = root.tag.split("}")[0][1:]
-            logger.debug(f"Found namespace in root tag: {namespace_uri}")
-        else:
-            # Check default xmlns attribute
-            if "xmlns" in root_attrs:
-                namespace_uri = root_attrs["xmlns"]
-                logger.debug(f"Found default namespace: {namespace_uri}")
-
-            # Check prefixed xmlns: attributes
-            if not namespace_uri:
-                for attr_name, attr_value in root_attrs.items():
-                    if attr_name.startswith("xmlns:"):
-                        namespace_uri = attr_value
-                        logger.debug(
-                            f"Found namespace with prefix {attr_name}: {namespace_uri}"
-                        )
-                        break
-
-            # Fall back to default sitemap namespace
-            if not namespace_uri:
-                namespace_uri = "http://www.sitemaps.org/schemas/sitemap/0.9"
-                logger.warning(
-                    f"Namespace not found in sitemap, using default: {namespace_uri}"
-                )
-
-        namespace = {"ns": namespace_uri}
-
-        # Extract URLs
-        logger.debug("Extracting URLs")
-        urls = []
-        url_elements = root.findall(".//ns:url", namespace)
-        logger.debug(f"Found {len(url_elements)} url elements")
-
-        for url_elem in url_elements:
-            loc_elem = url_elem.find("ns:loc", namespace)
-            if loc_elem is not None:
-                url = loc_elem.text
-                urls.append(url)
-                logger.debug(f"Added URL: {url}")
-
-        logger.debug(f"Found {len(urls)} URLs in sitemap")
-        logger.debug(f"First 5 URLs: {urls[:5]}")
-        return urls
-
-    except Exception as e:
-        logger.error(f"Error fetching sitemap: {e}", exc_info=True)
-        logger.warning(f"Falling back to base URL: {fallback_url}")
-        return [fallback_url]
-
-
-def send_telegram_message(message: str) -> None:
-    """Send a message to the Telegram channel, splitting if too long."""
-    max_length = 4000  # Safety margin from the 4096 limit
-    token, chat_id = telegram_credentials()
-    telegram_api_url = f"https://api.telegram.org/bot{token}/sendMessage"
-
-    # If message fits in one chunk, send as-is
-    if len(message) <= max_length:
-        payload = {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-        try:
-            response = requests.post(telegram_api_url, json=payload)
-            response.raise_for_status()
-        except Exception as e:
-            logger.error(f"Error sending to Telegram: {e}")
-        return
-
-    # Split into parts by message groups
-    parts = []
-    current_part = []
-    current_length = 0
-
-    # Extract the first line (timestamp header)
-    first_line = message.split("\n\n")[0]
-
-    # Split the rest into groups (one URL report each)
-    message_groups = message.split("\n\n")[1:]
-
-    for group in message_groups:
-        group_text = group + "\n\n"
-        group_length = len(group_text)
-
-        # If adding this group would exceed the limit
-        if current_length + group_length > max_length:
-            if current_part:
-                parts.append(first_line + "\n\n" + "".join(current_part))
-            current_part = [group_text]
-            current_length = len(first_line) + 2 + group_length
-        else:
-            current_part.append(group_text)
-            current_length += group_length
-
-    # Append the last part
-    if current_part:
-        parts.append(first_line + "\n\n" + "".join(current_part))
-
-    # Send each part
-    for i, part in enumerate(parts, 1):
-        if part.strip():
-            payload = {
-                "chat_id": chat_id,
-                "text": f"{part.strip()}\nPart {i} of {len(parts)}",
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            }
-            try:
-                response = requests.post(telegram_api_url, json=payload)
-                response.raise_for_status()
-                time.sleep(1)  # Small delay between sends
-            except Exception as e:
-                logger.error(f"Error sending part {i} to Telegram: {e}")
 
 
 def check_single_page(
@@ -271,7 +126,7 @@ def check_single_page(
         )
     except Exception as e:
         logger.error(f"Error checking {url} (Desktop): {e}")
-        messages.append(f"💻 Desktop:\nError: {str(e)}")
+        messages.append(f"💻 Desktop:\nError: {html.escape(str(e))}")
         has_success = False
         has_error = True
 
@@ -302,21 +157,67 @@ def check_single_page(
         )
     except Exception as e:
         logger.error(f"Error checking {url} (Mobile): {e}")
-        messages.append(f"📱 Mobile:\nError: {str(e)}")
+        messages.append(f"📱 Mobile:\nError: {html.escape(str(e))}")
         has_success = False
         has_error = True
 
     status_emoji = "🚨" if has_error else ("⚠️" if has_warning else "✅")
-    message = f"{status_emoji} URL: {url}\n" + "\n".join(messages)
+    message = f"{status_emoji} URL: {html.escape(url)}\n" + "\n".join(messages)
 
     return message, has_success and not has_warning, has_warning, has_error
+
+
+MAX_DETAILED_PAGES = 10
+
+
+def collect_urls(project: Project, settings: Settings) -> tuple[list[str], list[str]]:
+    """Return (urls to check, sitemap problems); falls back to the base URL."""
+    result = fetch_sitemap_urls(project.sitemap, settings)
+    problems = list(result.errors)
+    if not result.urls:
+        if not problems:
+            problems.append(f"{project.sitemap}: sitemap contains no URLs")
+        logger.warning(f"[{project.name}] falling back to base URL {project.url}")
+        return [project.url], problems
+    return result.urls, problems
+
+
+def build_project_report(
+    name: str,
+    total: int,
+    results: list[tuple[str, bool, bool, bool]],
+    settings: Settings,
+) -> str | None:
+    """Select results by notification settings; detail at most MAX_DETAILED_PAGES."""
+    selected = [
+        (message, is_error, is_warning)
+        for message, is_success, is_warning, is_error in results
+        if (is_success and settings.notify_success)
+        or (is_warning and settings.notify_warning)
+        or (is_error and settings.notify_error)
+    ]
+    if not selected:
+        return None
+
+    selected.sort(key=lambda r: (not r[1], not r[2]))
+    emoji = "🚨" if selected[0][1] else ("⚠️" if selected[0][2] else "✅")
+    blocks = [
+        f"{emoji} <b>{html.escape(name)}</b>: {len(selected)} of {total} pages reported"
+    ]
+    blocks.extend(m for m, _, _ in selected[:MAX_DETAILED_PAGES])
+    hidden = len(selected) - MAX_DETAILED_PAGES
+    if hidden > 0:
+        blocks.append(f"… and {hidden} more (see log)")
+    return "\n\n".join(blocks)
 
 
 def check_pages(config: Config) -> None:
     """Check all pages from every project's sitemap."""
     settings = config.settings
-    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    messages_to_send = []
+    timestamp = datetime.now(dt_timezone.utc).strftime("%d.%m.%Y %H:%M:%S")
+    blocks = []
+    totals = {}
+    results = {project.name: [] for project in config.projects}
 
     with requests.Session() as session:
 
@@ -326,28 +227,30 @@ def check_pages(config: Config) -> None:
         with ThreadPoolExecutor(max_workers=settings.max_workers) as executor:
             future_to_project = {}
             for project in config.projects:
-                urls = get_urls_from_sitemap(project.sitemap, project.url, settings)
+                urls, problems = collect_urls(project, settings)
+                totals[project.name] = len(urls)
+                if problems and settings.notify_error:
+                    lines = "\n".join(f"- {html.escape(p)}" for p in problems)
+                    blocks.append(
+                        f"🚨 <b>{html.escape(project.name)}</b>: sitemap problems\n{lines}"
+                    )
                 for url in urls:
                     future_to_project[executor.submit(check_with_session, url)] = (
                         project
                     )
 
             for future in concurrent.futures.as_completed(future_to_project):
-                project = future_to_project[future]
-                message, is_success, is_warning, is_error = future.result()
+                results[future_to_project[future].name].append(future.result())
 
-                # Add message according to notification settings
-                if (
-                    (is_success and settings.notify_success)
-                    or (is_warning and settings.notify_warning)
-                    or (is_error and settings.notify_error)
-                ):
-                    messages_to_send.append(f"[{html.escape(project.name)}] {message}")
+    for project in config.projects:
+        report = build_project_report(
+            project.name, totals[project.name], results[project.name], settings
+        )
+        if report:
+            blocks.append(report)
 
-    # Send if there are messages to deliver
-    if messages_to_send:
-        message = f"📅 {timestamp}\n\n" + "\n\n".join(messages_to_send)
-        send_telegram_message(message)
+    if blocks:
+        send_message(f"📅 {timestamp} UTC\n\n" + "\n\n".join(blocks))
 
 
 def send_daily_summary(config: Config) -> None:
@@ -365,7 +268,7 @@ def send_daily_summary(config: Config) -> None:
         logger.info(f"Read {len(log_lines)} lines from log file")
 
         # Filter logs from the last 24 hours
-        current_time = datetime.now(timezone("Europe/Helsinki"))
+        current_time = datetime.now(dt_timezone.utc)
         logger.info(f"Current time: {current_time}")
 
         recent_logs = []
@@ -378,7 +281,7 @@ def send_daily_summary(config: Config) -> None:
                 # Strip milliseconds before parsing
                 timestamp = timestamp.split(",")[0]
                 log_time = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
-                log_time = timezone("Europe/Helsinki").localize(log_time)
+                log_time = log_time.replace(tzinfo=dt_timezone.utc)
 
                 time_diff = current_time - log_time
                 seconds_diff = time_diff.total_seconds()
@@ -405,7 +308,7 @@ def send_daily_summary(config: Config) -> None:
                     f"📝 Total checks: {len(recent_logs)}"
                 )
                 logger.info("Sending success summary to Telegram")
-                send_telegram_message(message)
+                send_message(message)
             else:
                 message = (
                     f"⚠️ Daily Summary ({current_time.strftime('%d.%m.%Y')})\n\n"
@@ -413,14 +316,14 @@ def send_daily_summary(config: Config) -> None:
                     f"📝 Total checks: {len(recent_logs)}"
                 )
                 logger.info("Sending error summary to Telegram")
-                send_telegram_message(message)
+                send_message(message)
         else:
             message = (
                 f"⚠️ Daily Summary ({current_time.strftime('%d.%m.%Y')})\n\n"
                 f"No monitoring data found for the last 24 hours!"
             )
             logger.info("Sending no-data summary to Telegram")
-            send_telegram_message(message)
+            send_message(message)
 
     except Exception as e:
         logger.error(f"Error creating daily summary: {e}", exc_info=True)
@@ -431,7 +334,7 @@ def check_expiry(config: Config) -> None:
     now = datetime.now(dt_timezone.utc)
     report = format_report(run_expiry_checks(config), now)
     if report:
-        send_telegram_message(report)
+        send_message(report)
     else:
         logger.info("Expiry check completed - all OK")
 

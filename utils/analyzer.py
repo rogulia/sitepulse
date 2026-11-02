@@ -3,7 +3,7 @@ import sys
 import re
 from collections import defaultdict
 from statistics import mean, stdev
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -24,7 +24,13 @@ def parse_logs(log_file_path, days_limit=DAYS_TO_ANALYZE):
         for line in file:
             try:
                 log_date = datetime.strptime(line.split()[0], "%Y-%m-%d")
-                if days_limit and (datetime.now() - log_date).days > days_limit:
+                if (
+                    days_limit
+                    and (
+                        datetime.now(timezone.utc).replace(tzinfo=None) - log_date
+                    ).days
+                    > days_limit
+                ):
                     continue
             except (ValueError, IndexError):
                 continue
