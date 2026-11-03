@@ -104,7 +104,7 @@ See [config.example.toml](config.example.toml) for a complete template.
 | Key | Description |
 |---|---|
 | `name` | Domain name whose registration is checked |
-| `hosts` | Hosts whose SSL certificate is checked; default is the domain itself |
+| `hosts` | Hosts whose SSL certificate is checked; default is the domain itself, `[]` checks registration only |
 | `nameservers` | Optional; alerts if the registry reports none of them |
 | `expiry_fallback` | Optional `YYYY-MM-DD`; used only when RDAP and WHOIS both fail. Needed for TLDs that do not publish expiry dates (for example `.de`) |
 

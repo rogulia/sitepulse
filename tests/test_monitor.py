@@ -157,3 +157,13 @@ def test_runs_are_recorded_and_summarized(state_dir, monkeypatch):
 def test_summary_without_data(state_dir):
     now = monitor.datetime.now(monitor.dt_timezone.utc)
     assert "No monitoring data found" in monitor.build_summary(now)
+
+
+def test_recovery_list_is_capped(state_dir, monkeypatch):
+    urls = [f"https://a.com/{i}" for i in range(25)]
+    run_outcomes(monkeypatch, [(u, DOWN) for u in urls])
+    sent = run_outcomes(monkeypatch, [(u, UP) for u in urls])
+
+    assert len(sent) == 1
+    assert sent[0].count("(failing for") == monitor.MAX_DETAILED_PAGES
+    assert "… and 15 more" in sent[0]

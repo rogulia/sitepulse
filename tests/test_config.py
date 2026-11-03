@@ -87,3 +87,10 @@ def test_health_url_must_be_http(tmp_path):
 def test_missing_file(tmp_path):
     with pytest.raises(ConfigError):
         load_config(tmp_path / "missing.toml")
+
+
+def test_empty_hosts_means_registration_only(tmp_path):
+    text = VALID + '\n  [[project.domain]]\n  name = "acme.eu"\n  hosts = []\n'
+    config = load_config(write(tmp_path, text))
+
+    assert config.projects[0].domains[2].hosts == ()

@@ -271,6 +271,9 @@ def process_outcomes(
                 for key, downtime in transitions.recovered.items()
                 if key.startswith(project.name + KEY_SEPARATOR)
             ]
+            hidden = len(recovered) - MAX_DETAILED_PAGES
+            if hidden > 0:
+                recovered = recovered[:MAX_DETAILED_PAGES] + [f"… and {hidden} more"]
             if recovered:
                 blocks.append(
                     f"✅ <b>{html.escape(project.name)}</b>: recovered\n"

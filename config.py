@@ -102,7 +102,7 @@ def _parse_str_list(
 def _parse_domain(raw: dict, project: str) -> Domain:
     name = _require_str(raw, "name", f"project '{project}' domain").lower()
     where = f"project '{project}' domain '{name}'"
-    hosts = _parse_str_list(raw, "hosts", where) or (name,)
+    hosts = _parse_str_list(raw, "hosts", where) if "hosts" in raw else (name,)
     expiry = raw.get("expiry_fallback")
     if isinstance(expiry, date):
         expiry = expiry.isoformat()
