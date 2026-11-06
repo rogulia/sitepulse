@@ -2,7 +2,8 @@ import pytest
 import requests
 
 import monitor
-from config import Config, Project, Settings
+from checks.expiry import Finding
+from config import Config, Domain, Project, Settings
 from sitemap import SitemapResult
 
 ERR = ("🚨 URL: x", False, False, True)
@@ -120,6 +121,19 @@ def run_outcomes(monkeypatch, outcomes, deliver=True):
     return sent
 
 
+CONFIG = Config(
+    Settings(),
+    (
+        Project(
+            "p",
+            "https://a.com",
+            "https://a.com/sitemap.xml",
+            domains=(Domain("a.com", ("a.com",)), Domain("a.eu", ())),
+            health=("https://a.com/h",),
+        ),
+    ),
+)
+
 DOWN = ("🚨 Health: x", False, False, True)
 UP = ("✅ Health: x", True, False, False)
 
@@ -147,16 +161,38 @@ def test_runs_are_recorded_and_summarized(state_dir, monkeypatch):
     run_outcomes(monkeypatch, [("https://a.com/h", DOWN)])
 
     now = monitor.datetime.now(monitor.dt_timezone.utc)
-    summary = monitor.build_summary(now)
+    findings = [
+        Finding("p", "a.com", "warning", "registration expires in 29 days (04.12.2026)", "domain"),
+        Finding("p", "a.com", "critical", "SSL connection failed", "ssl"),
+    ]
+    summary = monitor.build_summary(now, CONFIG, findings)
 
-    assert "Health: 2 runs, 1 with failures" in summary
-    assert "failing: p https://a.com/h" in summary
+    assert "Health</b> (2 runs in 24h, 1 with failures)" in summary
+    assert "[ ! ] a.com/h failing since" in summary
+    assert "[ ! ] a.com expires in 29 days (04.12.2026)" in summary
+    assert "[ V ] a.eu" in summary
+    assert "[ X ] a.com connection failed" not in summary
+    assert "[ X ] a.com SSL connection failed" in summary
     assert "Pages" not in summary
 
 
-def test_summary_without_data(state_dir):
+def test_summary_all_ok(state_dir):
     now = monitor.datetime.now(monitor.dt_timezone.utc)
-    assert "No monitoring data found" in monitor.build_summary(now)
+    summary = monitor.build_summary(now, CONFIG, [])
+
+    assert "[ V ] a.com/h" in summary
+    assert "[ V ] a.eu\n\n<b>SSL" in summary
+    assert "[ ! ]" not in summary
+
+
+def test_summary_keeps_pages_line_only_when_pages_have_run(state_dir, monkeypatch):
+    now = monitor.datetime.now(monitor.dt_timezone.utc)
+    old = (now - monitor.timedelta(hours=30)).isoformat()
+    monitor.save_state("pages", {"failing": {}, "runs": [{"ts": old, "failed": False}]})
+
+    assert "[ ! ] Pages: no runs in the last 24 hours" in monitor.build_summary(
+        now, CONFIG, []
+    )
 
 
 def test_recovery_list_is_capped(state_dir, monkeypatch):

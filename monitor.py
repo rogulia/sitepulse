@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 import requests
 
-from checks.expiry import format_report, run_expiry_checks
+from checks.expiry import CRITICAL, DOMAIN, SSL, Finding, format_report, run_expiry_checks
 from config import (
     LOG_DIR,
     LOG_FILE,
@@ -390,42 +390,100 @@ def check_health(config: Config) -> None:
     process_outcomes("health", config, outcomes, totals, [])
 
 
-SUMMARY_MODES = (("Health", "health"), ("Pages", "pages"))
-MAX_SUMMARY_FAILURES = 10
 
 
-def build_summary(now: datetime) -> str:
-    """Summarize the last 24 hours from the stored run history."""
+def _checklist(items: list[tuple[str, list[Finding]]]) -> list[str]:
     lines = []
-    for label, name in SUMMARY_MODES:
-        data = load_state(name)
-        if not data["runs"]:
+    for name, findings in items:
+        if not findings:
+            lines.append(f"[ V ] {html.escape(name)}")
             continue
-        cutoff = now - timedelta(hours=24)
-        runs = [r for r in data["runs"] if datetime.fromisoformat(r["ts"]) >= cutoff]
-        if not runs:
-            lines.append(f"⚠️ {label}: no runs in the last 24 hours")
-            continue
-        failed_runs = sum(1 for r in runs if r["failed"])
-        healthy = not failed_runs and not data["failing"]
-        lines.append(
-            f"{'✅' if healthy else '⚠️'} {label}: {len(runs)} runs, "
-            f"{failed_runs} with failures"
+        worst = max(findings, key=lambda f: f.level == CRITICAL).level
+        mark = "X" if worst == CRITICAL else "!"
+        problems = "; ".join(
+            f.text.removeprefix("registration ").removeprefix("SSL certificate ")
+            for f in findings
         )
-        for key, entry in list(data["failing"].items())[:MAX_SUMMARY_FAILURES]:
-            project, _, url = key.partition(KEY_SEPARATOR)
-            since = datetime.fromisoformat(entry["since"]).strftime("%d.%m.%Y %H:%M")
-            lines.append(
-                f"- failing: {html.escape(project)} {html.escape(url)} since {since} UTC"
+        lines.append(f"[ {mark} ] {html.escape(name)} {html.escape(problems)}")
+    return lines
+
+
+def build_summary(now: datetime, config: Config, findings: list[Finding]) -> str:
+    """Checklist of everything monitored: health from stored state, expiry from findings."""
+    health = load_state("health")
+    cutoff = now - timedelta(hours=24)
+    runs = [r for r in health["runs"] if datetime.fromisoformat(r["ts"]) >= cutoff]
+    failing = health["failing"]
+    health_items = []
+    for project in config.projects:
+        for url in project.health:
+            entry = failing.get(f"{project.name}{KEY_SEPARATOR}{url}")
+            label = url.split("://", 1)[-1].rstrip("/")
+            if entry:
+                since = datetime.fromisoformat(entry["since"]).strftime("%d.%m.%Y %H:%M")
+                label = f"{label} failing since {since} UTC"
+            health_items.append((label, bool(entry)))
+
+    lines = []
+    if health_items:
+        failed_runs = sum(1 for r in runs if r["failed"])
+        lines.append(
+            f"<b>Health</b> ({len(runs)} runs in 24h, {failed_runs} with failures)"
+        )
+        for label, is_failing in health_items:
+            mark = "!" if is_failing else "V"
+            lines.append(f"[ {mark} ] {html.escape(label)}")
+        lines.append("")
+
+    domain_items, ssl_items = [], []
+    for project in config.projects:
+        for domain in project.domains:
+            domain_items.append(
+                (
+                    domain.name,
+                    [
+                        f
+                        for f in findings
+                        if f.kind == DOMAIN
+                        and f.project == project.name
+                        and f.subject == domain.name
+                    ],
+                )
             )
-        hidden = len(data["failing"]) - MAX_SUMMARY_FAILURES
-        if hidden > 0:
-            lines.append(f"… and {hidden} more failing")
+            for host in domain.hosts:
+                ssl_items.append(
+                    (
+                        host,
+                        [
+                            f
+                            for f in findings
+                            if f.kind == SSL
+                            and f.project == project.name
+                            and f.subject == host
+                        ],
+                    )
+                )
+    if domain_items:
+        lines += ["<b>Domain renewal</b>", *_checklist(domain_items), ""]
+    if ssl_items:
+        lines += ["<b>SSL</b>", *_checklist(ssl_items), ""]
+
+    pages = load_state("pages")
+    if pages["runs"]:
+        page_runs = [r for r in pages["runs"] if datetime.fromisoformat(r["ts"]) >= cutoff]
+        if page_runs:
+            failed_runs = sum(1 for r in page_runs if r["failed"])
+            mark = "V" if not failed_runs and not pages["failing"] else "!"
+            lines.append(
+                f"[ {mark} ] Pages: {len(page_runs)} runs, {failed_runs} with failures"
+            )
+        else:
+            lines.append("[ ! ] Pages: no runs in the last 24 hours")
 
     header = f"📊 Daily Summary ({now.strftime('%d.%m.%Y')})"
-    if not lines:
-        return header + "\n\n⚠️ No monitoring data found"
-    return header + "\n\n" + "\n".join(lines)
+    if not any(lines):
+        return header + "\n\n⚠️ Nothing configured to monitor"
+    return header + "\n\n" + "\n".join(lines).rstrip()
 
 
 def send_daily_summary(config: Config) -> None:
@@ -433,7 +491,8 @@ def send_daily_summary(config: Config) -> None:
     from utils.clean_logs import clean_old_logs
 
     clean_old_logs(LOG_FILE, config.settings.log_retention_days)
-    send_message(build_summary(datetime.now(dt_timezone.utc)))
+    now = datetime.now(dt_timezone.utc)
+    send_message(build_summary(now, config, run_expiry_checks(config)))
 
 
 def check_expiry(config: Config) -> None:

@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 CRITICAL = "critical"
 WARNING = "warning"
+DOMAIN = "domain"
+SSL = "ssl"
 _SEVERITY = {WARNING: 1, CRITICAL: 2}
 _EMOJI = {WARNING: "⚠️", CRITICAL: "🚨"}
 
@@ -23,6 +25,7 @@ class Finding:
     subject: str
     level: str
     text: str
+    kind: str = ""
 
 
 def classify(days_left: int, warn_days: int, critical_days: int) -> str | None:
@@ -55,6 +58,7 @@ def check_domain_registration(
                 domain.name,
                 CRITICAL,
                 f"registration check failed: {e}",
+                DOMAIN,
             )
         ]
 
@@ -71,6 +75,7 @@ def check_domain_registration(
                 domain.name,
                 level,
                 f"registration {_days_phrase(days_left)} ({_format_date(info.expiry)})",
+                DOMAIN,
             )
         )
 
@@ -82,6 +87,7 @@ def check_domain_registration(
                     domain.name,
                     WARNING,
                     "nameservers differ from config: " + ", ".join(info.nameservers),
+                    DOMAIN,
                 )
             )
     return findings
@@ -92,7 +98,7 @@ def check_host_certificate(
 ) -> list[Finding]:
     cert = check_certificate(host)
     if cert.error:
-        return [Finding(project.name, host, CRITICAL, f"SSL {cert.error}")]
+        return [Finding(project.name, host, CRITICAL, f"SSL {cert.error}", SSL)]
 
     logger.info(f"SSL {host}: {cert.days_left} days left")
     level = classify(cert.days_left, settings.ssl_warn_days, settings.ssl_critical_days)
@@ -105,6 +111,7 @@ def check_host_certificate(
             level,
             f"SSL certificate {_days_phrase(cert.days_left)} "
             f"({_format_date(cert.expires.date())})",
+            SSL,
         )
     ]
 
