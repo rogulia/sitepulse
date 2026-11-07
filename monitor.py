@@ -394,9 +394,10 @@ def check_health(config: Config) -> None:
 
 def _checklist(items: list[tuple[str, list[Finding]]]) -> list[str]:
     lines = []
+    ok = []
     for name, findings in items:
         if not findings:
-            lines.append(f"✅ {html.escape(name)}")
+            ok.append(name)
             continue
         worst = max(findings, key=lambda f: f.level == CRITICAL).level
         mark = "❌" if worst == CRITICAL else "⚠️"
@@ -405,6 +406,8 @@ def _checklist(items: list[tuple[str, list[Finding]]]) -> list[str]:
             for f in findings
         )
         lines.append(f"{mark} {html.escape(name)} {html.escape(problems)}")
+    if ok:
+        lines.append(f"✅ {html.escape(', '.join(ok))}")
     return lines
 
 
@@ -430,9 +433,10 @@ def build_summary(now: datetime, config: Config, findings: list[Finding]) -> str
         lines.append(
             f"<b>Health</b> ({len(runs)} runs in 24h, {failed_runs} with failures)"
         )
-        for label, is_failing in health_items:
-            mark = "❌" if is_failing else "✅"
-            lines.append(f"{mark} {html.escape(label)}")
+        lines += [f"❌ {html.escape(label)}" for label, is_failing in health_items if is_failing]
+        ok_labels = [label for label, is_failing in health_items if not is_failing]
+        if ok_labels:
+            lines.append(f"✅ {html.escape(', '.join(ok_labels))}")
         lines.append("")
 
     domain_items, ssl_items = [], []

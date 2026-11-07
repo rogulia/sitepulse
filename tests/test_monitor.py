@@ -171,6 +171,7 @@ def test_runs_are_recorded_and_summarized(state_dir, monkeypatch):
     assert "❌ a.com/h failing since" in summary
     assert "⚠️ a.com expires in 29 days (04.12.2026)" in summary
     assert "✅ a.eu" in summary
+    assert "✅ a.com, a.eu" not in summary
     assert "❌ a.com connection failed" not in summary
     assert "❌ a.com SSL connection failed" in summary
     assert "Pages" not in summary
@@ -181,7 +182,7 @@ def test_summary_all_ok(state_dir):
     summary = monitor.build_summary(now, CONFIG, [])
 
     assert "✅ a.com/h" in summary
-    assert "✅ a.eu\n\n<b>SSL" in summary
+    assert "✅ a.com, a.eu\n\n<b>SSL" in summary
     assert "⚠️" not in summary
 
 
