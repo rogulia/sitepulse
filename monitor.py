@@ -396,15 +396,15 @@ def _checklist(items: list[tuple[str, list[Finding]]]) -> list[str]:
     lines = []
     for name, findings in items:
         if not findings:
-            lines.append(f"[ V ] {html.escape(name)}")
+            lines.append(f"✅ {html.escape(name)}")
             continue
         worst = max(findings, key=lambda f: f.level == CRITICAL).level
-        mark = "X" if worst == CRITICAL else "!"
+        mark = "❌" if worst == CRITICAL else "⚠️"
         problems = "; ".join(
             f.text.removeprefix("registration ").removeprefix("SSL certificate ")
             for f in findings
         )
-        lines.append(f"[ {mark} ] {html.escape(name)} {html.escape(problems)}")
+        lines.append(f"{mark} {html.escape(name)} {html.escape(problems)}")
     return lines
 
 
@@ -431,8 +431,8 @@ def build_summary(now: datetime, config: Config, findings: list[Finding]) -> str
             f"<b>Health</b> ({len(runs)} runs in 24h, {failed_runs} with failures)"
         )
         for label, is_failing in health_items:
-            mark = "!" if is_failing else "V"
-            lines.append(f"[ {mark} ] {html.escape(label)}")
+            mark = "❌" if is_failing else "✅"
+            lines.append(f"{mark} {html.escape(label)}")
         lines.append("")
 
     domain_items, ssl_items = [], []
@@ -473,12 +473,12 @@ def build_summary(now: datetime, config: Config, findings: list[Finding]) -> str
         page_runs = [r for r in pages["runs"] if datetime.fromisoformat(r["ts"]) >= cutoff]
         if page_runs:
             failed_runs = sum(1 for r in page_runs if r["failed"])
-            mark = "V" if not failed_runs and not pages["failing"] else "!"
+            mark = "✅" if not failed_runs and not pages["failing"] else "⚠️"
             lines.append(
-                f"[ {mark} ] Pages: {len(page_runs)} runs, {failed_runs} with failures"
+                f"{mark} Pages: {len(page_runs)} runs, {failed_runs} with failures"
             )
         else:
-            lines.append("[ ! ] Pages: no runs in the last 24 hours")
+            lines.append("⚠️ Pages: no runs in the last 24 hours")
 
     header = f"📊 Daily Summary ({now.strftime('%d.%m.%Y')})"
     if not any(lines):

@@ -168,11 +168,11 @@ def test_runs_are_recorded_and_summarized(state_dir, monkeypatch):
     summary = monitor.build_summary(now, CONFIG, findings)
 
     assert "Health</b> (2 runs in 24h, 1 with failures)" in summary
-    assert "[ ! ] a.com/h failing since" in summary
-    assert "[ ! ] a.com expires in 29 days (04.12.2026)" in summary
-    assert "[ V ] a.eu" in summary
-    assert "[ X ] a.com connection failed" not in summary
-    assert "[ X ] a.com SSL connection failed" in summary
+    assert "❌ a.com/h failing since" in summary
+    assert "⚠️ a.com expires in 29 days (04.12.2026)" in summary
+    assert "✅ a.eu" in summary
+    assert "❌ a.com connection failed" not in summary
+    assert "❌ a.com SSL connection failed" in summary
     assert "Pages" not in summary
 
 
@@ -180,9 +180,9 @@ def test_summary_all_ok(state_dir):
     now = monitor.datetime.now(monitor.dt_timezone.utc)
     summary = monitor.build_summary(now, CONFIG, [])
 
-    assert "[ V ] a.com/h" in summary
-    assert "[ V ] a.eu\n\n<b>SSL" in summary
-    assert "[ ! ]" not in summary
+    assert "✅ a.com/h" in summary
+    assert "✅ a.eu\n\n<b>SSL" in summary
+    assert "⚠️" not in summary
 
 
 def test_summary_keeps_pages_line_only_when_pages_have_run(state_dir, monkeypatch):
@@ -190,7 +190,7 @@ def test_summary_keeps_pages_line_only_when_pages_have_run(state_dir, monkeypatc
     old = (now - monitor.timedelta(hours=30)).isoformat()
     monitor.save_state("pages", {"failing": {}, "runs": [{"ts": old, "failed": False}]})
 
-    assert "[ ! ] Pages: no runs in the last 24 hours" in monitor.build_summary(
+    assert "⚠️ Pages: no runs in the last 24 hours" in monitor.build_summary(
         now, CONFIG, []
     )
 
